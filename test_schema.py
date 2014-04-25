@@ -3,7 +3,13 @@ import os
 
 from pytest import raises
 
-from schema import Schema, Use, And, Or, Optional, SchemaError, guard
+from schema import Schema, Use, And, Or, Optional, SchemaError
+
+
+try:
+    basestring
+except NameError:
+    basestring = str  # Python 3 does not have basestring
 
 
 SE = raises(SchemaError)
@@ -60,6 +66,8 @@ def test_or():
     assert Or(int, dict).validate(5) == 5
     assert Or(int, dict).validate({}) == {}
     with SE: Or(int, dict).validate('hai')
+    assert Or(int).validate(4)
+    with SE: Or().validate(2)
 
 
 def test_validate_list():
@@ -98,19 +106,35 @@ def test_dict():
         try:
             Schema({'key': 5}).validate({})
         except SchemaError as e:
-            assert e.args[0] == "missed keys set(['key'])"
+            assert e.args[0] in ["missed keys set(['key'])",
+                                 "missed keys {'key'}"]  # Python 3 style
             raise
     with SE:
         try:
             Schema({'key': 5}).validate({'n': 5})
         except SchemaError as e:
-            assert e.args[0] == "key 'key' is required"
+            assert e.args[0] in ["missed keys set(['key'])",
+                                 "missed keys {'key'}"]  # Python 3 style
             raise
     with SE:
         try:
             Schema({}).validate({'n': 5})
         except SchemaError as e:
-            assert e.args[0] == "wrong keys {} in {'n': 5}"
+            assert e.args[0] == "wrong keys 'n' in {'n': 5}"
+            raise
+    with SE:
+        try:
+            Schema({'key': 5}).validate({'key': 5, 'bad': 5})
+        except SchemaError as e:
+            assert e.args[0] in ["wrong keys 'bad' in {'key': 5, 'bad': 5}",
+                                 "wrong keys 'bad' in {'bad': 5, 'key': 5}"]
+            raise
+    with SE:
+        try:
+            Schema({}).validate({'a': 5, 'b': 5})
+        except SchemaError as e:
+            assert e.args[0] in ["wrong keys 'a', 'b' in {'a': 5, 'b': 5}",
+                                 "wrong keys 'a', 'b' in {'b': 5, 'a': 5}"]
             raise
 
 
@@ -147,6 +171,10 @@ def test_nice_errors():
         assert e.errors == ['should be integer']
     try:
         Schema(Use(float), error='should be a number').validate('x')
+    except SchemaError as e:
+        assert e.code == 'should be a number'
+    try:
+        Schema({Optional('i'): Use(int, error='should be a number')}).validate({'i': 'x'})
     except SchemaError as e:
         assert e.code == 'should be a number'
 
@@ -287,38 +315,30 @@ def test_error_reporting():
         assert e.code == 'Error:\n<files> should be readable'
 
 
-def test_guard():
-    @guard(Use(int), And(str, lambda s: len(s)), Or(None, float))
-    def fn(i, s, f=None):
-        assert type(i) is int
-        assert type(s) is str and len(s)
-        assert type(f) is float or f is None
-    fn('1', 'hai')
-    fn(123, 'hai', 3.14)
-    with SE: fn('not int', 'hai')
-    with SE: fn(123, '')
-    with SE: fn(123, 'hai', 314)
-    fn(i='1', s='hai')
-    fn(1, s='hai')
-    with SE: fn(i='X', s='hai')
-    with SE: fn('X', s='hai')
-
-
-def test_guard_args_kw():
-    @guard(a=Use(int), b=int, args=(3,), kw={Optional(str): int})
-    def fn(a, b=2, *args, **kw):
-        """Docstring."""
-        return locals()
-    assert fn.__doc__ == "Docstring."
-    assert fn('1', 2, 3, ka=10, kb=20) == \
-            {'a': 1, 'b': 2, 'args': (3,), 'kw': {'ka': 10, 'kb': 20}}
-    assert fn(1, 2, 3) == {'a': 1, 'b': 2, 'args': (3,), 'kw': {}}
-    with SE: fn(1, 2, 3, 4)
-    assert fn(1, 2, 3, 3, 3) == {'a': 1, 'b': 2, 'args': (3, 3, 3), 'kw': {}}
-
-
 def test_schema_repr():  # what about repr with `error`s?
-    s = Schema([Or(None, And(str,
-                             Use(float)))])
-    assert repr(s) == ("Schema([Or(None, And(<type 'str'>, "
-                                            "Use(<type 'float'>)))])")
+    schema = Schema([Or(None, And(str, Use(float)))])
+    repr_ = "Schema([Or(None, And(<type 'str'>, Use(<type 'float'>)))])"
+    # in Python 3 repr contains <class 'str'>, not <type 'str'>
+    assert repr(schema).replace('class', 'type') == repr_
+
+
+def test_validate_object():
+    schema = Schema({object: str})
+    assert schema.validate({42: 'str'}) == {42: 'str'}
+    with SE: schema.validate({42: 777})
+
+
+def test_issue_9_prioritized_key_comparison():
+    validate = Schema({'key': 42, object: 42}).validate
+    assert validate({'key': 42, 777: 42}) == {'key': 42, 777: 42}
+
+
+def test_issue_9_prioritized_key_comparison_in_dicts():
+    # http://stackoverflow.com/questions/14588098/docopt-schema-validation
+    s = Schema({'ID': Use(int, error='ID should be an int'),
+                'FILE': Or(None, Use(open, error='FILE should be readable')),
+                Optional(str): object})
+    data = {'ID': 10, 'FILE': None, 'other': 'other', 'other2': 'other2'}
+    assert s.validate(data) == data
+    data = {'ID': 10, 'FILE': None}
+    assert s.validate(data) == data

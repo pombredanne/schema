@@ -1,5 +1,4 @@
-from inspect import getargspec
-from functools import wraps
+__version__ = '0.3.0'
 
 
 class SchemaError(Exception):
@@ -44,13 +43,14 @@ class And(object):
 class Or(And):
 
     def validate(self, data):
+        x = SchemaError([], [])
         for s in [Schema(s, error=self._error) for s in self._args]:
             try:
                 return s.validate(data)
-            except SchemaError as x:
-                pass
+            except SchemaError as _x:
+                x = _x
         raise SchemaError(['%r did not validate %r' % (self, data)] + x.autos,
-                         [self._error] + x.errors)
+                          [self._error] + x.errors)
 
 
 class Use(object):
@@ -73,6 +73,22 @@ class Use(object):
             raise SchemaError('%s(%r) raised %r' % (f, data, x), self._error)
 
 
+def priority(s):
+    """Return priority for a give object."""
+    if type(s) in (list, tuple, set, frozenset):
+        return 6
+    if type(s) is dict:
+        return 5
+    if hasattr(s, 'validate'):
+        return 4
+    if issubclass(type(s), type):
+        return 3
+    if callable(s):
+        return 2
+    else:
+        return 1
+
+
 class Schema(object):
 
     def __init__(self, schema, error=None):
@@ -90,39 +106,45 @@ class Schema(object):
             return type(s)(Or(*s, error=e).validate(d) for d in data)
         if type(s) is dict:
             data = Schema(dict, error=e).validate(data)
-            new = type(data)()
+            new = type(data)()  # new - is a dict of the validated values
             x = None
             coverage = set()  # non-optional schema keys that were matched
+            # for each key and value find a schema entry matching them, if any
+            sorted_skeys = list(sorted(s, key=priority))
             for key, value in data.items():
                 valid = False
                 skey = None
-                for skey, svalue in s.items():
+                for skey in sorted_skeys:
+                    svalue = s[skey]
                     try:
                         nkey = Schema(skey, error=e).validate(key)
-                        try:
-                            nvalue = Schema(svalue, error=e).validate(value)
-                        except SchemaError as x:
-                            raise
                     except SchemaError:
                         pass
                     else:
-                        coverage.add(skey)
-                        valid = True
-                        break
+                        try:
+                            nvalue = Schema(svalue, error=e).validate(value)
+                        except SchemaError as _x:
+                            x = _x
+                            raise
+                        else:
+                            coverage.add(skey)
+                            valid = True
+                            break
                 if valid:
                     new[nkey] = nvalue
-                elif type(skey) is not Optional and skey is not None:
+                elif skey is not None:
                     if x is not None:
-                        raise SchemaError(['key %r is required' % key] +
+                        raise SchemaError(['invalid value for key %r' % key] +
                                           x.autos, [e] + x.errors)
-                    else:
-                        raise SchemaError('key %r is required' % skey, e)
             coverage = set(k for k in coverage if type(k) is not Optional)
             required = set(k for k in s if type(k) is not Optional)
             if coverage != required:
                 raise SchemaError('missed keys %r' % (required - coverage), e)
             if len(new) != len(data):
-                raise SchemaError('wrong keys %r in %r' % (new, data), e)
+                wrong_keys = set(data.keys()) - set(new.keys())
+                s_wrong_keys = ', '.join('%r' % k for k in sorted(wrong_keys))
+                raise SchemaError('wrong keys %s in %r' % (s_wrong_keys, data),
+                                  e)
             return new
         if hasattr(s, 'validate'):
             try:
@@ -131,8 +153,8 @@ class Schema(object):
                 raise SchemaError([None] + x.autos, [e] + x.errors)
             except BaseException as x:
                 raise SchemaError('%r.validate(%r) raised %r' % (s, data, x),
-                                 self._error)
-        if type(s) is type:
+                                  self._error)
+        if issubclass(type(s), type):
             if isinstance(data, s):
                 return data
             else:
@@ -147,7 +169,7 @@ class Schema(object):
             except BaseException as x:
                 raise SchemaError('%s(%r) raised %r' % (f, data, x),
                                   self._error)
-            raise SchemaError('%s(%r) should evalutate to True' % (f, data), e)
+            raise SchemaError('%s(%r) should evaluate to True' % (f, data), e)
         if s == data:
             return data
         else:
@@ -157,31 +179,3 @@ class Schema(object):
 class Optional(Schema):
 
     """Marker for an optional part of Schema."""
-
-
-def guard(*schemas, **kwschema):
-    def decorator(oldf):
-        spec = getargspec(oldf)
-        @wraps(oldf)
-        def newf(*args, **kw):
-        #make_env = eval('lambda %s: locals()' % formatargspec(*spec)[1:][:-1])
-        #env = make_env(*args, **kw)
-            env = dict(zip(reversed(spec.args), reversed(spec.defaults or ()))
-                     + zip(spec.args, args)
-                     + [(k, v) for k, v in kw.items() if k in spec.args])
-            if spec.varargs is not None:
-                env[spec.varargs] = args[len(spec.args):]
-            if spec.keywords is not None:
-                env[spec.keywords] = dict((k, v) for k, v in kw.items()
-                                          if k not in spec.args)
-            senv = dict(zip(spec.args, schemas) + kwschema.items())
-            venv = Schema(senv).validate(env)
-            nargs = tuple(venv[k] for k in spec.args)
-            if spec.varargs is not None:
-                nargs += venv[spec.varargs]
-            nkw = dict((venv[spec.keywords].items() if spec.keywords else [])
-                    + [(k, v) for k, v in venv.items() if k not in
-                       tuple(spec.args) + (spec.varargs, spec.keywords)])
-            return oldf(*nargs, **nkw)
-        return newf
-    return decorator
